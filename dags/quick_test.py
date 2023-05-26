@@ -44,78 +44,26 @@ mimetype_dict = {
 
 
 def test_concept(**kwargs):
-    # items = get_files_from_gdrive_parent_subfolders('1UhZmufgxPBJTalNjvnfvIimHOmOF8gEh','text/csv',1)
-    # items = get_files_from_gdrive_parent_subfolders(parent_folder_id='1UZk2JArK5_IzrgaI-PAK11W11tNsHulC',mimetype='text/csv',subfolder_level=1)
-    # items = get_files_from_gdrive_parent_subfolders(parent_folder_id='1_O4sf7kGL4LFmIiMcP6a9IbDPq0FZn5U',mimetype='text/csv',subfolder_level=1)
-    items = get_files_from_gdrive_parent_subfolders(parent_folder_id='1Rq0GdBE81CmR-IbLmqcenrXGiicTxFQO',mimetype='text/csv',subfolder_level=0)
-    for item in items:
-        print(item)
+    upload_file_to_s3(task_id=1, folder_id=1, file_name_with_path='Extraswitch report/202305/MX1049_Paystack_Daily_IPG_Report_2023_05_07.xlsx', local_path='/tmp',top_rows_to_skip=0)
 
-def get_files_from_gdrive_parent_subfolders(parent_folder_id, mimetype, subfolder_level=None):
-    drive_hook = GoogleDriveHook(gcp_conn_id=GDRIVE_CONN)
-    # Build the Drive API client using the credentials from the connection
-    drive_service = build('drive', 'v3', credentials=drive_hook.get_credentials())
 
-    # Function to retrieve files within a folder and its subfolders recursively
-    def retrieve_files(folder_id, current_level, page_token=None):
-        files = []
-        query = f"'{folder_id}' in parents and trashed = false"
 
-        if mimetype:
-            query += f" and (mimeType = '{mimetype}' or mimeType = 'application/vnd.google-apps.folder')"
-
-        response = drive_service.files().list(
-            q=query,
-            fields='files(id, name, parents, mimeType)',
-            pageToken=page_token
-        ).execute()
-
-        items = response.get('files', [])
-        files += items
-
-        if subfolder_level is not None and current_level >= subfolder_level:
-            return files
-
-        subfolders = [item for item in items if item['mimeType'] == 'application/vnd.google-apps.folder']
-        print(f"Subfolders in folder '{folder_id}': {len(subfolders)}")
-
-        for subfolder in subfolders:
-            subfolder_id = subfolder['id']
-            print(f"Retrieving files in subfolder '{subfolder_id}' at level {current_level + 1}")
-            subfolder_files = retrieve_files(subfolder_id, current_level + 1)
-            files += subfolder_files
-
-        if 'nextPageToken' in response:
-            next_page_token = response['nextPageToken']
-            print(f"Retrieving next page of files in folder '{folder_id}'")
-            next_page_files = retrieve_files(folder_id, current_level, page_token=next_page_token)
-            files += next_page_files
-
-        return files
-
-    # Retrieve files from the parent folder and its subfolders
-    print(f"Retrieving files from parent folder '{parent_folder_id}'")
-    files = retrieve_files(parent_folder_id, 0)
-
-    # Create a list of files with their IDs, names, and complete file paths
-    file_list = []
-    for file in files:
-        if file['mimeType'] == 'application/vnd.google-apps.folder': #We do not need folders
-            continue
-        file_id = file['id']
-        file_name = file['name']
-        parents = file.get('parents', [])
-
-        # Retrieve the complete file path
-        file_path = file_name
-        for parent_id in parents:
-            parent_name = drive_service.files().get(fileId=parent_id, fields='name').execute().get('name', '')
-            file_path = parent_name + '/' + file_path
-
-        # Append the file ID, name, and complete file path to the list
-        file_list.append({'id': file_id, 'name': file_name, 'path': file_path})
-
-    return file_list
+def upload_file_to_s3(**kwargs):
+    #Get file specific details
+    task_id = kwargs.get('task_id', 'upload_file_to_s3')
+    file_name_with_path = kwargs.get('file_name_with_path','') #it has fullpath
+    local_path = kwargs.get('local_path', '/tmp')
+    base_name, extension = os.path.splitext(file_name_with_path)
+    new_local_path_csv = local_path + '/' + base_name + '.csv'
+    s3_upload_file_name_with_path = base_name + '.csv'
+    unique_load_name = kwargs.get('unique_load_name', '')
+    bucket_name = kwargs.get('bucket_name', S3_BUCKET_NAME)
+    s3_prefix_start = kwargs.get('s3_prefix_start', S3_PREFIX_START)
+    s3_folder_name = '{}/{}'.format(s3_prefix_start, unique_load_name)
+    upload_file_df = pd.read_csv(new_local_path_csv)
+    target_columns_list = upload_file_df.columns.to_list()
+    temp_column_list = ",".join(target_columns_list)
+    print(target_columns_list)
 
 
 
