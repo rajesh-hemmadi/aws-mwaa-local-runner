@@ -24,11 +24,11 @@ from airflow.models import XCom
 
 
 from datetime import datetime, timedelta
-DEBUG = False
+DEBUG = True
 
 REDSHIFT_CONN_ID = "paystack_redshift"
 REDSHIFT_DATABASE = "paystackharmonyredshift"
-REDSHIFT_SCHEMA = "gdrive_ingestions"
+REDSHIFT_SCHEMA = "gdrive_ingestions_test"
 S3_CONN_ID = 'paystack_s3'
 S3_BUCKET_NAME = 'paystack-datalake'
 S3_PREFIX_START = 'gdrive_files'
@@ -347,7 +347,6 @@ def download_file_from_gdrive(**kwargs):
         file_name_with_path = kwargs.get('file_name_with_path') #it has fullpath
         local_path = kwargs.get('local_path', '/tmp')
         final_local_path = local_path + '/' + os.path.dirname(file_name_with_path)
-        os.makedirs(final_local_path, exist_ok=True)
         only_file_name = file_name_with_path.split('/')[-1]
 
         download_from_gdrive_to_local = GoogleDriveToLocalOperator(
@@ -366,7 +365,6 @@ def download_file_from_gdrive(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
 
 def prepare_files_to_upload_to_s3(**kwargs):
     try:
@@ -411,7 +409,6 @@ def prepare_files_to_upload_to_s3(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
 
 
 
@@ -449,7 +446,6 @@ def upload_file_to_s3(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
 
 def load_csv_file_to_redshift(**kwargs):
     try:
@@ -473,7 +469,7 @@ def load_csv_file_to_redshift(**kwargs):
         #Create temp table before deleting the file after the s3 upload
         upload_file_df = pd.read_csv(new_local_path_csv, nrows=1)
         target_columns_list = upload_file_df.columns.to_list()
-        temp_column_list = ",".join(['"' + column.lower() + '"' for column in target_columns_list])
+        temp_column_list = ",".join(target_columns_list)
         redshift_call_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_create_temp_table_with_columnslist_v2', params={
                                         'p_unique_load_name': unique_load_name,'columns_list' : temp_column_list})
         
@@ -485,7 +481,7 @@ def load_csv_file_to_redshift(**kwargs):
         s3_key=s3_final_path,
         schema=redshift_schema,
         table=target_table_temp,
-        copy_options=["CSV", "DELIMITER ','", "IGNOREHEADER 1", "IGNOREBLANKLINES"],
+        copy_options=["CSV", "DELIMITER ','", "IGNOREBLANKLINES"],
         aws_conn_id=S3_CONN_ID,
         redshift_conn_id=REDSHIFT_CONN_ID
         )
@@ -511,7 +507,6 @@ def load_csv_file_to_redshift(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
 
 
 
@@ -566,7 +561,7 @@ def list_files_to_transfer(**kwargs):
                 current_date_time = datetime.now()
                 file_name = item['path']  + item['name'] #Complete path
                 file_parent_folder_id = item['parent_folder_id']
-                task_id = f"Downloading_file_{file_name.split('/')[-1].replace(' ','_').replace('(','').replace(')','')}"
+                task_id = f"Downloading_file_{file_name.split('/')[-1].replace(' ','_')}"
                 # print(f"{item['name']} modified at {item['modifiedTime']}")
                 #if we have already processed the same file based on unique_load_name and file_name and processed = True then we skip and move to next file
                 v_is_file_processed = return_first_cell_data_from_redshift_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_check_if_file_processed', params={
@@ -605,7 +600,7 @@ default_args = {
     "retries": 0,
     'on_failure_callback': ''
 }
-with DAG(dag_id="gdrive_ingest_data_to_redshift_v2",
+with DAG(dag_id="gdrive_ingest_data_to_redshift_v2_test",
          description="Ingests the data from GDrive into redshift",
          default_args=default_args,
          max_active_runs=1,
