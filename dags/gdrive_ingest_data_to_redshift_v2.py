@@ -16,16 +16,17 @@ from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemTo
 from airflow.exceptions import AirflowException
 import io
 import os
+import re
 import logging
 from utils.notification import send_notification
+import fnmatch
 
 
 from airflow.models import XCom
 
 
 from datetime import datetime, timedelta
-DEBUG = False
-
+DEBUG = True
 REDSHIFT_CONN_ID = "paystack_redshift"
 REDSHIFT_DATABASE = "paystackharmonyredshift"
 REDSHIFT_SCHEMA = "gdrive_ingestions"
@@ -41,6 +42,10 @@ mimetype_dict = {
     'txt': 'text/plain'
     # add more file extensions and corresponding MIME types as needed
 }
+
+def is_blank(value):
+    return value is None or not str(value).strip()
+
 
 def process_df_and_load_to_temp(hook,spreadsheet_id,sheet_range,metadata_columns,temp_table_name):
     try:
@@ -73,8 +78,8 @@ def get_gdrive_metadata_from_metadataSheet():
         target_column_metadata_sheet_name = "target_column_metadata!A:E"
         target_column_metadata_columns = ['id', 'target_table_metadata_id', 'target_column_name', 'target_column_order']
         
-        file_metadata_sheet_name = "file_metadata!A:J"
-        file_metadata_columns = ['id', 'source_folder_path', 'source_file_type', 'source_file_delimiter', 'source_sheet_name', 'top_rows_to_skip',
+        file_metadata_sheet_name = "file_metadata!A:K"
+        file_metadata_columns = ['id', 'source_folder_path', 'source_file_type', 'source_file_delimiter', 'source_file_name_pattern','source_sheet_name', 'top_rows_to_skip',
                                  'pre_processing_script','target_table_metadata_id' , 'is_active', 'unique_load_name']
         
         column_mapping_metadata_sheet_name = "column_mapping_metadata!A:E"
@@ -95,7 +100,8 @@ def get_gdrive_metadata_from_metadataSheet():
     
 
 
-def get_files_from_gdrive_parent_subfolders(parent_folder_id, mimetype, subfolder_level=None):
+
+def get_files_from_gdrive_parent_subfolders(parent_folder_id, mimetype, subfolder_level=None,file_name_pattern=None):
     drive_hook = GoogleDriveHook(gcp_conn_id=GDRIVE_CONN)
     # Build the Drive API client using the credentials from the connection
     drive_service = build('drive', 'v3', credentials=drive_hook.get_credentials())
@@ -158,8 +164,13 @@ def get_files_from_gdrive_parent_subfolders(parent_folder_id, mimetype, subfolde
     for file in files:
         if file['mimeType'] == 'application/vnd.google-apps.folder': #We do not need folders
             continue
-        file_id = file['id']
         file_name = file['name']
+        #We now check file name pattern if exists or passed
+        if not is_blank(file_name_pattern):
+            if not fnmatch.fnmatch(file_name.lower(), file_name_pattern.lower()):
+                continue
+
+        file_id = file['id']
         file_path = file['parents']
         print('Parent Path = ' + file['parent_path'])
         # Get the immediate parent folder ID
@@ -218,6 +229,45 @@ def redshift_call_stored_procedure(**kwargs):
         send_notification(type="error", message=message)
         raise AirflowException(message)
 
+def retrun_data_from_stored_procedure_as_df(**kwargs):
+    try:
+        redshift_hook = RedshiftSQLHook(redshift_conn_id=REDSHIFT_CONN_ID)
+        schema_name = kwargs.get('schema_name')
+        sp_name = kwargs.get('sp_name')
+        # Even thoough it is expecting dictionery of parameters, it considers only values so be careful of order of paramateres
+        params = kwargs.get('params')
+        param_str = ", ".join([f"'{value}'" if not isinstance(
+            value, int) else f"{value}" for value in params.values()])
+        result_name = param_str.split(',')[-1].replace("'", "")
+
+        # columns = ['id','source_folder_path','source_file_type','source_sheet_name','is_active','source_folder_name','target_table','target_db','target_schema','unique_load_name','file_last_extract_datetime']
+        # Define the SQL queries to execute
+        sql_queries = [
+            "CALL {}.{}({});".format(schema_name, sp_name, param_str),
+            f"FETCH ALL FROM {result_name};"
+        ]
+
+        results = []
+        column_names = []
+        with redshift_hook.get_conn() as conn:
+            with conn.cursor() as cursor:
+                for sql_query in sql_queries:
+                    cursor.execute(sql_query)
+                    result = cursor.fetchall()
+                    if result:
+                        results.append(result)
+                        # Extract the column names
+                        column_names.append([col_desc[0]
+                                            for col_desc in cursor.description])
+
+        # Convert the results to a pandas dataframe
+        df = pd.DataFrame(results[1], columns=column_names[1])
+        return df
+    except Exception as err:
+        print(err)
+        message = "Function retrun_data_from_stored_procedure_as_df failed : \n" + str(err)
+        send_notification(type="error", message=message)
+        raise AirflowException(message)
 
 
 def return_first_cell_data_from_redshift_stored_procedure(**kwargs):
@@ -366,7 +416,7 @@ def download_file_from_gdrive(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
+        raise ValueError(message)
 
 def prepare_files_to_upload_to_s3(**kwargs):
     try:
@@ -386,9 +436,9 @@ def prepare_files_to_upload_to_s3(**kwargs):
         new_local_path_csv = base_name + '.csv'
         #read source file
         if file_extension == 'csv':
-            source_df = pd.read_csv(final_local_path,skiprows=top_rows_to_skip,sep=source_file_delimiter)
+            source_df = pd.read_csv(final_local_path,skiprows=int(top_rows_to_skip),sep=source_file_delimiter,dtype=str)
         elif file_extension == 'xlsx':
-            source_df = pd.read_excel(final_local_path, sheet_name=source_sheet_name, skiprows=top_rows_to_skip)
+            source_df = pd.read_excel(final_local_path, sheet_name=source_sheet_name, skiprows=int(top_rows_to_skip),dtype=str)
         else:
             print(f'Unknown file extension {file_extension}')
             return False
@@ -411,7 +461,7 @@ def prepare_files_to_upload_to_s3(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
+        raise ValueError(message)
 
 
 
@@ -449,7 +499,7 @@ def upload_file_to_s3(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
+        raise ValueError(message)
 
 def load_csv_file_to_redshift(**kwargs):
     try:
@@ -511,7 +561,7 @@ def load_csv_file_to_redshift(**kwargs):
             str(err)
         send_notification(type="error", message=message)
         # raise AirflowException(message)
-        raise Exception
+        raise ValueError(message)
 
 
 
@@ -525,13 +575,13 @@ def list_files_to_transfer(**kwargs):
         json_df = ti.xcom_pull(key='gdrive_load_details')
         df = pd.read_json(json_df)
       
-        file_metadata_df = df[['source_folder_path', 'source_file_type', 'source_file_delimiter', 'source_sheet_name', 'top_rows_to_skip', 'pre_processing_script', 'target_table_metadata_id', 'is_active', 'unique_load_name']].drop_duplicates()
+        file_metadata_df = df[['source_folder_path', 'source_file_type', 'source_file_delimiter', 'source_file_name_pattern','source_sheet_name', 'top_rows_to_skip', 'pre_processing_script', 'target_table_metadata_id', 'is_active', 'unique_load_name']].drop_duplicates()
         for index, row in file_metadata_df.iterrows():
             unique_load_name = row['unique_load_name']
             column_metadata_df = df[df['unique_load_name'] == unique_load_name][['unique_load_name', 'source_column_name','target_column_name']]
         
             parent_folder_id = row['source_folder_path'].split('/')[-1]
-            
+            source_file_name_pattern = row['source_file_name_pattern']
             file_extension = row['source_file_type']
             source_sheet_name = row['source_sheet_name']
             print(f'Source Sheet Name is : {source_sheet_name}')
@@ -556,8 +606,19 @@ def list_files_to_transfer(**kwargs):
                 continue
 
             subfolder_level = 1 #For future purpose, now it is hard coded to go only one level deep
-            items = get_files_from_gdrive_parent_subfolders(parent_folder_id,mimetype,subfolder_level)
+            items = get_files_from_gdrive_parent_subfolders(parent_folder_id,mimetype,subfolder_level,source_file_name_pattern)
 
+            #At this stage read all processed files data from redshift so we don't have to run v_is_file_processed task one by one
+            processed_files_list = retrun_data_from_stored_procedure_as_df(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_get_list_of_processed_files_for_unique_load_name', params={
+                                                                   'p_unique_load_name': row['unique_load_name'], 'rs_out': 'rs_out'})
+
+            # Filter items
+            filtered_items = [item for item in items if f"{item['path']}{item['name']}" not in processed_files_list['file_name'].tolist()]
+
+            print('Filtered Items are as below')
+            print(filtered_items)
+
+            items = filtered_items
             # Iterate through the list of files and print their names and modified times
             if DEBUG:  # When set debug deal with only one file rather than all files
                 items = items[:1]
@@ -566,14 +627,14 @@ def list_files_to_transfer(**kwargs):
                 current_date_time = datetime.now()
                 file_name = item['path']  + item['name'] #Complete path
                 file_parent_folder_id = item['parent_folder_id']
-                task_id = f"Downloading_file_{file_name.split('/')[-1].replace(' ','_').replace('(','').replace(')','')}"
+                task_id = "Downloading_file_" + re.sub( r'[\W_]' , '', file_name.split('/')[-1])
                 # print(f"{item['name']} modified at {item['modifiedTime']}")
                 #if we have already processed the same file based on unique_load_name and file_name and processed = True then we skip and move to next file
-                v_is_file_processed = return_first_cell_data_from_redshift_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_check_if_file_processed', params={
-                                                                   'p_unique_load_name': row['unique_load_name'], 'p_file_name': file_name, 'rs_out': 'rs_out'})
+                #v_is_file_processed = return_first_cell_data_from_redshift_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_check_if_file_processed', params={
+                #                                                  'p_unique_load_name': row['unique_load_name'], 'p_file_name': file_name, 'rs_out': 'rs_out'})
                 #if file is already processed continue to next file
-                if v_is_file_processed:
-                    continue
+                #if v_is_file_processed:
+                #    continue
 
                 update_load_process_reference_table(p_unique_load_name = unique_load_name,p_file_name= file_name, p_airflow__dag_id= dag_id, p_airflow__run_id= run_id, p_first_time_check=1, p_process_current_status='Load Process is in Progress' )
                 try:
