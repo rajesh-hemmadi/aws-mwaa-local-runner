@@ -435,9 +435,9 @@ def prepare_files_to_upload_to_s3(**kwargs):
         new_local_path_csv = base_name + '.csv'
         #read source file
         if file_extension == 'csv':
-            source_df = pd.read_csv(final_local_path,skiprows=int(top_rows_to_skip),sep=source_file_delimiter,dtype=str)
+            source_df = pd.read_csv(final_local_path,skiprows=int(top_rows_to_skip),sep=source_file_delimiter,keep_default_na=False, na_values=[''],dtype=str)
         elif file_extension == 'xlsx':
-            source_df = pd.read_excel(final_local_path, sheet_name=source_sheet_name, skiprows=int(top_rows_to_skip),dtype=str)
+            source_df = pd.read_excel(final_local_path, sheet_name=source_sheet_name, skiprows=int(top_rows_to_skip),keep_default_na=False, na_values=[''],dtype=str)
         else:
             print(f'Unknown file extension {file_extension}')
             return False
@@ -449,6 +449,8 @@ def prepare_files_to_upload_to_s3(**kwargs):
         # Rename the columns to target_column_name after converting to lower
         #output_df.columns.str.lower()
         output_df.columns = column_metadata_df['target_column_name'].tolist()
+        # Add a new column called "row_number" as the first column
+        output_df.insert(0, 'file_row_number', range(1, len(output_df) + 1))
         # Write the output DataFrame to a new CSV file
         output_df.to_csv(new_local_path, index=False, quoting=1)
 
@@ -524,7 +526,7 @@ def load_csv_file_to_redshift(**kwargs):
         upload_file_df = pd.read_csv(new_local_path_csv, nrows=1)
         target_columns_list = upload_file_df.columns.to_list()
         temp_column_list = ",".join(['"' + column.lower() + '"' for column in target_columns_list])
-        redshift_call_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_create_temp_table_with_columnslist_v2', params={
+        redshift_call_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_create_temp_table_with_columnslist', params={
                                         'p_unique_load_name': unique_load_name,'columns_list' : temp_column_list})
         
         os.remove(new_local_path_csv)
@@ -549,7 +551,7 @@ def load_csv_file_to_redshift(**kwargs):
         load_data_task.execute(context=None)
         load_process_reference_id = return_first_cell_data_from_redshift_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_get_load_reference_id', params={
                                                                    'p_unique_load_name': unique_load_name, 'p_file_name': file_name_with_path, 'rs_out': 'rs_out'})
-        redshift_call_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_read_temp_load_target_v2', params={
+        redshift_call_stored_procedure(schema_name=REDSHIFT_SCHEMA, sp_name='gdrive_process_read_temp_load_target', params={
                                         'p_unique_load_name': unique_load_name,'p_columns_list' : temp_column_list, 'p_load_process_reference_id' :load_process_reference_id  })
         
         s3_delete_object_operator.execute(context=None)
@@ -666,7 +668,7 @@ default_args = {
     "retries": 0,
     'on_failure_callback': ''
 }
-with DAG(dag_id="gdrive_ingest_data_to_redshift_v2_test",
+with DAG(dag_id="gdrive_ingest_data_to_redshift_test",
          description="Ingests the data from GDrive into redshift",
          default_args=default_args,
          max_active_runs=1,
