@@ -13,22 +13,24 @@ from airflow.providers.google.cloud.transfers.gdrive_to_local import GoogleDrive
 from googleapiclient.discovery import build
 from airflow.providers.amazon.aws.transfers.s3_to_redshift import S3ToRedshiftOperator
 from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemToS3Operator
-from airflow.providers.sftp.hooks.sftp import SFTPHook
+from airflow.providers.sftp.hooks.sftp import SFTPHook as BaseSFTPHook
 from airflow.providers.sftp.operators.sftp import SFTPOperator
 from airflow.exceptions import AirflowException
 import io
+import stat
 import os
 import re
 import logging
 from utils.notification import send_notification
 import fnmatch
-
+from typing import Any, Callable
 
 from airflow.models import XCom
+from utils.pre_processing_scripts import ghipssGenerateDateFolders, combine_excel_sheets_using_pandas
 
 
 from datetime import datetime, timedelta
-DEBUG = False
+DEBUG = True
 REDSHIFT_CONN_ID = "paystack_redshift"
 REDSHIFT_DATABASE = "paystackharmonyredshift"
 REDSHIFT_SCHEMA = "sftp_ingestions"
@@ -45,8 +47,60 @@ mimetype_dict = {
     # add more file extensions and corresponding MIME types as needed
 }
 
+
+
+class SFTPHookCustom(BaseSFTPHook):
+    def walktree(
+        self,
+        path: str,
+        fcallback: Callable[[str], Any | None],
+        dcallback: Callable[[str], Any | None],
+        ucallback: Callable[[str], Any | None],
+        recurse: bool = True,
+    ) -> None:
+        #print('Inside custom walktree')
+        """Recursively descend, depth first, the directory tree at ``path``.
+
+        This calls discrete callback functions for each regular file, directory,
+        and unknown file type.
+
+        :param str path:
+            root of remote directory to descend, use '.' to start at
+            :attr:`.pwd`
+        :param callable fcallback:
+            callback function to invoke for a regular file.
+            (form: ``func(str)``)
+        :param callable dcallback:
+            callback function to invoke for a directory. (form: ``func(str)``)
+        :param callable ucallback:
+            callback function to invoke for an unknown file type.
+            (form: ``func(str)``)
+        :param bool recurse: *Default: True* - should it recurse
+        """
+        conn = self.get_conn()
+        for entry in self.list_directory(path):
+            pathname = os.path.join(path, entry)
+            try:
+                mode = conn.stat(pathname).st_mode
+            except:
+                print(f'Error related to path {pathname}, Continuing to next dir')
+                continue
+            if stat.S_ISDIR(mode):  # type: ignore
+                # It's a directory, call the dcallback function
+                dcallback(pathname)
+                if recurse:
+                    # now, recurse into it
+                    self.walktree(pathname, fcallback, dcallback, ucallback)
+            elif stat.S_ISREG(mode):  # type: ignore
+                # It's a file, call the fcallback function
+                fcallback(pathname)
+            else:
+                # Unknown file type
+                ucallback(pathname)
+
 def is_blank(value):
     return value is None or not str(value).strip()
+
 
 
 def process_df_and_load_to_temp(hook,spreadsheet_id,sheet_range,metadata_columns,temp_table_name):
@@ -108,21 +162,39 @@ def get_file_names_from_sftp_server(connection, remote_path=None, depth=0, file_
     #Depth will not have impact here
     remote_path = remote_path if remote_path.endswith('/') else remote_path + '/'
     try:
-        sftp_hook = SFTPHook(ftp_conn_id=connection)
+        sftp_hook = SFTPHookCustom(ftp_conn_id=connection)
 
         # Retrieve objects from the SFTP server 
-        files = sftp_hook.list_directory(remote_path)
+        if connection == 'sftp_ghipss_reports':
+            files = []
+            dir_list = ghipssGenerateDateFolders()
+            for dir in dir_list:
+                path = remote_path + dir + '/'
+                try:
+                    fil_list = sftp_hook.list_directory(path)
+                except Exception as err:
+                    print(f'There was an error listing directory : {path} \n {err}')
+                    continue
+                fil_list_with_dir_path = [path + item for item in fil_list]
+                files.extend(fil_list_with_dir_path)
+        elif remote_path == '/': #Here when you do not need recurse 
+            files = sftp_hook.list_directory(remote_path)
+        else:
+            files = sftp_hook.get_tree_map(path=remote_path) #Tree map brings 3 list of tuples
+            files = files[0]
+        print(files)
         file_list = []
         for fil in files:
             if file_extension and not fil.endswith(file_extension):
                 # Skip files that do not match the file extension
                 continue
-
-            if file_name_pattern and not fnmatch.fnmatch(fil.lower(), file_name_pattern.lower()):
+            
+            file_name_only = fil.split('/')[-1]
+            if file_name_pattern and not fnmatch.fnmatch(file_name_only.lower(), file_name_pattern.lower()):
                 # Skip files that do not match the file name pattern
                 continue  
             # Append the file name and complete file path to the list
-            file_list.append({'name': fil, 'path': connection + ':' + remote_path + fil})
+            file_list.append({'name': file_name_only, 'path': connection + (':' if fil.startswith('/') else ':/')  + fil})
         
         print (file_list)
         return file_list
@@ -361,6 +433,9 @@ def download_file_from_sftp(**kwargs):
             )
         get_file.execute(context=None)
         print(f'File {file_name_with_path} Downloaded from SFTP')
+        #This is only for zenith_gh statements files
+        if ssh_conn_id == 'sftp_zenith_gh' and 'statement' in final_local_path.lower():
+            combine_excel_sheets_using_pandas(final_local_path)
 
     except Exception as err:
         print(err)
@@ -395,7 +470,15 @@ def prepare_files_to_upload_to_s3(**kwargs):
             return False
         #from source df prepare output df and file
         # Select only the desired columns from the source_df
-        output_df = source_df[column_metadata_df['source_column_name']]
+        #filter is used so if there are 
+        output_df = source_df.filter(items=column_metadata_df['source_column_name'])
+        # Add missing columns with null values
+        missing_columns = set(column_metadata_df['source_column_name']) - set(output_df.columns)
+        if missing_columns:
+            message = "Missing Columns Error, following are the missing columns : \n " +  ','.join(missing_columns)
+            send_notification(type="info", message=message)
+            output_df = output_df.reindex(columns=output_df.columns.union(missing_columns), fill_value=None)
+
         #reindex for better readability in order of column
         output_df = output_df.reindex(columns=column_metadata_df['source_column_name'])
         # Rename the columns to target_column_name
@@ -537,6 +620,7 @@ def list_files_to_transfer(**kwargs):
             source_file_name_pattern = row['source_file_name_pattern']
             file_extension = row['source_file_type']
             source_sheet_name = row['source_sheet_name']
+            print(f'Unique Load Name is : {unique_load_name}')
             print(f'Source Sheet Name is : {source_sheet_name}')
             if source_sheet_name == '' or source_sheet_name is None:
                 source_sheet_name = 0
@@ -630,8 +714,8 @@ with DAG(dag_id="sftp_ingest_data_to_redshift",
          description="Ingests the data from GDrive into redshift",
          default_args=default_args,
          max_active_runs=1,
-         dagrun_timeout=timedelta(hours=1),
-         schedule_interval="*/15 * * * *",
+         dagrun_timeout=timedelta(hours=3),
+         schedule_interval="0 * * * *",
          start_date=datetime(2023, 4, 2, 0, 0, 0, 0),
          catchup=False,
          tags=["sftp", "ingestions"]

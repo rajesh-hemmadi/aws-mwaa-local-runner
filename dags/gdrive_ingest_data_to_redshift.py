@@ -26,7 +26,7 @@ from airflow.models import XCom
 
 
 from datetime import datetime, timedelta
-DEBUG = False
+DEBUG = True
 REDSHIFT_CONN_ID = "paystack_redshift"
 REDSHIFT_DATABASE = "paystackharmonyredshift"
 REDSHIFT_SCHEMA = "gdrive_ingestions"
@@ -72,6 +72,7 @@ def get_gdrive_metadata_from_metadataSheet():
     try:
         # Specify the file path and sheet name of the Google Sheet
         spreadsheet_id = '1Y14A2lfHOTCS1GqtQBsYfHtqihziJzjyyrNwAOw7tng'
+        #spreadsheet_id = '1pwGRILYXb3QzOaj7Ll2jFXZJU5fNu9RU4FOdIFA0JDU'
         target_table_metadata_sheet_name = "target_table_metadata!A:F"
         target_table_metadata_columns = ['id', 'target_db', 'target_schema', 'target_table', 'target_table_metadata_id']
 
@@ -437,6 +438,7 @@ def prepare_files_to_upload_to_s3(**kwargs):
         #read source file
         if file_extension == 'csv':
             source_df = pd.read_csv(final_local_path,skiprows=int(top_rows_to_skip),sep=source_file_delimiter,keep_default_na=False, na_values=[''],dtype=str)
+            print(source_df)
         elif file_extension == 'xlsx':
             source_df = pd.read_excel(final_local_path, sheet_name=source_sheet_name, skiprows=int(top_rows_to_skip),keep_default_na=False, na_values=[''],dtype=str)
         else:
@@ -444,7 +446,15 @@ def prepare_files_to_upload_to_s3(**kwargs):
             return False
         #from source df prepare output df and file
         # Select only the desired columns from the source_df
-        output_df = source_df[column_metadata_df['source_column_name']]
+        #filter is used so if there are 
+        output_df = source_df.filter(items=column_metadata_df['source_column_name'])
+        # Add missing columns with null values
+        missing_columns = set(column_metadata_df['source_column_name']) - set(output_df.columns)
+        if missing_columns:
+            message = "Missing Columns Error, following are the missing columns : \n " +  ','.join(missing_columns)
+            send_notification(type="info", message=message)
+            output_df = output_df.reindex(columns=output_df.columns.union(missing_columns), fill_value=None)
+
         #reindex for better readability in order of column
         output_df = output_df.reindex(columns=column_metadata_df['source_column_name'])
         # Rename the columns to target_column_name
@@ -673,7 +683,7 @@ with DAG(dag_id="gdrive_ingest_data_to_redshift",
          default_args=default_args,
          max_active_runs=1,
          dagrun_timeout=timedelta(hours=3),
-         schedule_interval="*/15 * * * *",
+         schedule_interval="0 * * * *",
          start_date=datetime(2023, 4, 2, 0, 0, 0, 0),
          catchup=False,
          tags=["gdrive", "ingestions"]

@@ -19,6 +19,7 @@ import os
 import re
 import logging
 from utils.notification import send_notification
+from utils.pre_processing_scripts import *
 import fnmatch
 
 
@@ -360,19 +361,19 @@ def download_file_from_s3(**kwargs):
         bucket_name=kwargs.get('bucket_name', S3_BUCKET_NAME)
         local_path = kwargs.get('local_path', '/tmp')
         final_local_path = local_path + '/' + os.path.dirname(file_name_with_path)
+        final_local_path_with_file_name = local_path + '/' + file_name_with_path
+        pre_processing_script=kwargs.get('pre_processing_script',None)
         os.makedirs(final_local_path, exist_ok=True)
         only_file_name = file_name_with_path.split('/')[-1]
         s3_hook = S3Hook(aws_conn_id=S3_CONN_ID)
         downloaded_file_name = s3_hook.download_file(bucket_name=bucket_name, key=file_name_with_path, local_path=final_local_path)
         os.rename(downloaded_file_name,final_local_path+'/'+only_file_name)
-        # download_from_s3_to_local = S3DownloadOperator(
-        #         task_id='download_file',
-        #         aws_conn_id=S3_CONN_ID,
-        #         bucket_name=bucket_name,
-        #         object_name=file_name_with_path,
-        #         local_path=final_local_path +'/'+only_file_name
-        #     )
-        # download_from_s3_to_local.execute(context=None)
+        if pre_processing_script:
+            formatted_command = manage_pre_processing_script_param(
+                pre_processing_script=pre_processing_script,
+                final_local_path_with_file_name=final_local_path_with_file_name
+            )
+            exec(formatted_command)
         print(f'File {file_name_with_path} Downloaded from S3')
 
     except Exception as err:
@@ -408,7 +409,15 @@ def prepare_files_to_upload_to_s3(**kwargs):
             return False
         #from source df prepare output df and file
         # Select only the desired columns from the source_df
-        output_df = source_df[column_metadata_df['source_column_name']]
+        #filter is used so if there are 
+        output_df = source_df.filter(items=column_metadata_df['source_column_name'])
+        # Add missing columns with null values
+        missing_columns = set(column_metadata_df['source_column_name']) - set(output_df.columns)
+        if missing_columns:
+            message = "Missing Columns Error, following are the missing columns : \n " +  ','.join(missing_columns)
+            send_notification(type="info", message=message)
+            output_df = output_df.reindex(columns=output_df.columns.union(missing_columns), fill_value=None)
+
         #reindex for better readability in order of column
         output_df = output_df.reindex(columns=column_metadata_df['source_column_name'])
         # Rename the columns to target_column_name
@@ -456,7 +465,7 @@ def upload_file_to_s3(**kwargs):
         )
 
         s3_upload_operator.execute(context=None)
-        #os.remove('{}/{}'.format(final_local_path, download_file_name))
+        #os.remove('{}'.format(new_local_path_csv))
 
 
     except Exception as err:
@@ -550,6 +559,7 @@ def list_files_to_transfer(**kwargs):
             source_file_name_pattern = row['source_file_name_pattern']
             file_extension = row['source_file_type']
             source_sheet_name = row['source_sheet_name']
+            pre_processing_script = row['pre_processing_script']
             print(f'Source Sheet Name is : {source_sheet_name}')
             if source_sheet_name == '' or source_sheet_name is None:
                 source_sheet_name = 0
@@ -612,7 +622,7 @@ def list_files_to_transfer(**kwargs):
 
                 update_load_process_reference_table(p_unique_load_name = unique_load_name,p_file_name= file_name, p_airflow__dag_id= dag_id, p_airflow__run_id= run_id, p_first_time_check=1, p_process_current_status='Load Process is in Progress' )
                 try:
-                    download_file_from_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',bucket_name=bucket_name)
+                    download_file_from_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',bucket_name=bucket_name,pre_processing_script=pre_processing_script)
                     prepare_files_to_upload_to_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',file_extension=file_extension,source_file_delimiter=source_file_delimiter, top_rows_to_skip=top_rows_to_skip,source_sheet_name=source_sheet_name,column_metadata_df=column_metadata_df)
                     upload_file_to_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',unique_load_name=unique_load_name,s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
                     load_csv_file_to_redshift(task_id=task_id,file_name_with_path=file_name,local_path='/tmp',unique_load_name=unique_load_name,s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
@@ -646,8 +656,8 @@ with DAG(dag_id="s3_ingest_data_to_redshift",
          description="Ingests the data from GDrive into redshift",
          default_args=default_args,
          max_active_runs=1,
-         dagrun_timeout=timedelta(hours=1),
-         schedule_interval="*/15 * * * *",
+         dagrun_timeout=timedelta(hours=3),
+         schedule_interval="0 * * * *",
          start_date=datetime(2023, 4, 2, 0, 0, 0, 0),
          catchup=False,
          tags=["s3", "ingestions"]

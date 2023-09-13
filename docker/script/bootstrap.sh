@@ -12,7 +12,7 @@ yum install -y sudo
 yum erase openssl-devel -y
 yum install openssl11 openssl11-devel libffi-devel bzip2-devel wget tar xz -y
 # Install python optional standard libary module dependencies 
-yum install ncurses-devel gdbm-devel readline-devel xz-libs xz-devel uuid-devel libuuid-devel -y 
+yum install ncurses-devel gdbm-devel readline-devel xz-libs xz-devel uuid-devel libuuid-devel libxslt-devel libxml2-devel -y 
 yum install glibc -y
 
 # install system dependency to enable the installation of most Airflow extras
@@ -38,7 +38,7 @@ make install -j $(nproc) # use -j to set the cores for the build
 popd
 
 # Upgrade pip
-pip3 install $PIP_OPTION --upgrade pip
+pip3 install $PIP_OPTION --upgrade pip setuptools wheel
 
 # openjdk is required for JDBC to work with Airflow
 yum install -y java-1.8.0-openjdk

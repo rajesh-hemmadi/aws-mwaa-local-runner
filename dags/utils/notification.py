@@ -3,7 +3,7 @@
 def send_notification(type="info",message=''):
     print('Sending Notifcation')
     print('notification type is :' , type)
-    print('notification type is :' , message)
+    print('notification Message is :' , message)
     print('Notification Sent')
 
     """Notes to delete
