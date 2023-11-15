@@ -3,6 +3,10 @@ import csv
 import os
 import pandas as pd
 import re
+import sys
+import xlrd
+import msoffcrypto
+import io
 def ghipssGenerateDateFolders():
     min_date_str = '2023-07-25' #In Future this has to change
     min_date = datetime.strptime(min_date_str, '%Y-%m-%d')
@@ -36,8 +40,8 @@ def remove_preambles_2(final_local_path_with_file_name=None):
     # Output CSV file name
     output_filename = input_filename + '.csv'
     # Pattern to search for
-    starts_with = ['NIBSS','TITAN','TRANSACTION','GENERATED','SOURCE >>','Paystack','DESTINATION >>','ACTIVITY REPORT']
-    special_cases = ['SOURCE INSTITUTION ','SOURCE BANK SUMMARY','FULL BILLING','DESTINATION BANK SUMMARY','FULL DAY SUMMARY'] 
+    starts_with = ['NIBSS','TITAN','TRANSACTION','GENERATED','SOURCE >>','Paystack','PAYSTACK','DESTINATION >>','ACTIVITY REPORT']
+    special_cases = ['SOURCE INSTITUTION ','SOURCE BANK SUMMARY','FULL BILLING','DESTINATION BANK SUMMARY','DESTINATION INSTITUTION ','FULL DAY SUMMARY'] 
     header_starts_with = 'S/N'
     
     with open(input_filename, 'r',errors='ignore') as infile:
@@ -52,7 +56,7 @@ def remove_preambles_2(final_local_path_with_file_name=None):
                 continue
             if not line.strip():
                 continue  
-            if line.startswith(header_starts_with):
+            if line.startswith(header_starts_with) or line.startswith('"' + header_starts_with):
                 if header_found:
                     continue
                 else:
@@ -122,4 +126,82 @@ def combine_excel_sheets_using_pandas(final_local_path_with_file_name=None):
         cnt += 1
     df_main.to_excel(final_local_path_with_file_name,index=False)
 
+
+def convert_html_read_using_pandas(final_local_path_with_file_name=None):
+    try:
+        base_name, extension = os.path.splitext(final_local_path_with_file_name)
+        html_file_name = base_name + '.html'
+        os.rename(final_local_path_with_file_name,html_file_name)
+        df = pd.read_html(html_file_name,attrs = {'id': 'dgtrans'})[0]
+        df.columns = df.iloc[0]
+        df = df[1:]
+        df = df.reset_index(drop=True)
+        df.to_excel(final_local_path_with_file_name,index=False)
+
+    except Exception as err:
+        print(f'Function convert_html_read_using_pandas failed with error \n {err}')
+        sys.exit(1)
+
+def for_zenith_statement_xlsx(final_local_path_with_file_name=None):
+    try:
+        df = pd.read_excel(final_local_path_with_file_name)
+        # Find the index of the first row with all NaN values (excluding the first column)
+        empty_row_index = df.iloc[:, 1:].apply(lambda row: row.isna().all(), axis=1).idxmax()
+        # Slice the DataFrame up to the empty row
+        df = df.iloc[:empty_row_index]
+
+        df = df.rename(columns={"Create Date": "DATE", "Effective Date": "VALUE DATE", "Description/Payee/Memo": "PARTICULARS"})
+        df.columns = df.columns.str.lower()
+        df = df[['date','particulars','debit','credit','value date','balance']]
+        df.to_excel(final_local_path_with_file_name,index=False)
+    except Exception as err:
+        print(f'Function for_zenith_statement_xlsx failed with error \n {err}')
+        sys.exit(1)
+
+def for_zenith_statement_xls(final_local_path_with_file_name=None):
+    base_name, extension = os.path.splitext(final_local_path_with_file_name)
+    account_number = base_name.split(' ')[1]
+    passwd = account_number[-5:-1]
+    html_file_name = base_name + '.html'
+    try:
+        df = pd.read_excel(final_local_path_with_file_name)
+    except ValueError as e:
+        if 'Excel file format cannot be determined, you must specify an engine manually.' in str(e):     
+            os.rename(final_local_path_with_file_name,html_file_name)
+            df = pd.read_html(html_file_name)[0]
+            # Find the index of the first row with all NaN values (excluding the first column)
+            empty_row_index = df.iloc[:, 1:].apply(lambda row: row.isna().all(), axis=1).idxmax()
+            df = df.iloc[:empty_row_index]
+            df = df.rename(columns={"Create Date": "DATE", "Effective Date": "VALUE DATE", "Description/Payee/Memo": "PARTICULARS"})
+            df.columns = df.columns.str.lower()
+            df = df[['date','particulars','debit','credit','value date','balance']]
+            df.to_excel(final_local_path_with_file_name,index=False)
+        #df.to_excel(final_local_path_with_file_name,index=False)
+    except xlrd.XLRDError as e:
+        if "Workbook is encrypted" in str(e):
+            # Catch the specific XLRDError when the workbook is encrypted and handle it
+            print("Workbook is encrypted. passing password.")
+            decrypted_workbook = io.BytesIO()
+            with open(final_local_path_with_file_name, 'rb') as xls_file:
+                office_file = msoffcrypto.OfficeFile(xls_file)
+                office_file.load_key(password=passwd)
+                office_file.decrypt(decrypted_workbook)
+            df = pd.read_excel(decrypted_workbook)
+            df = df[8:]
+            df.columns = df.iloc[0]
+            df = df[1:]
+            df = df.reset_index(drop=True)
+            df.columns = df.columns.str.lower()
+            df = df[['date','particulars','debit','credit','value date','balance']]
+            total_index = df[df['particulars'] == 'TOTALS'].index
+            df = df.iloc[:total_index[0]]
+            df.to_excel(final_local_path_with_file_name,index=False) 
+            
+        else:
+            # Handle other XLRDError cases
+            print(f"An XLRDError occurred: {e}")
+            sys.exit(1)
+    except Exception as err:
+            print(f'Function for_zenith_statement_xls failed with error \n {err}')
+            sys.exit(1)
 

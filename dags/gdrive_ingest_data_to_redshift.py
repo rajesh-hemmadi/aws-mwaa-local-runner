@@ -19,6 +19,7 @@ import os
 import re
 import logging
 from utils.notification import send_notification
+from utils.pre_processing_scripts import *
 import fnmatch
 
 
@@ -39,7 +40,8 @@ GDRIVE_CONN = "gdrive_service_account"
 mimetype_dict = {
     'csv': 'text/csv',
     'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'txt': 'text/plain'
+    'txt': 'text/plain',
+    'xls' : 'application/vnd.ms-excel',
     # add more file extensions and corresponding MIME types as needed
 }
 
@@ -398,6 +400,8 @@ def download_file_from_gdrive(**kwargs):
         file_name_with_path = kwargs.get('file_name_with_path') #it has fullpath
         local_path = kwargs.get('local_path', '/tmp')
         final_local_path = local_path + '/' + os.path.dirname(file_name_with_path)
+        final_local_path_with_file_name = local_path + '/' + file_name_with_path
+        pre_processing_script=kwargs.get('pre_processing_script',None)
         os.makedirs(final_local_path, exist_ok=True)
         only_file_name = file_name_with_path.split('/')[-1]
 
@@ -409,6 +413,12 @@ def download_file_from_gdrive(**kwargs):
             output_file='{}/{}'.format(final_local_path, only_file_name)
         )
         download_from_gdrive_to_local.execute(context=None)
+        if pre_processing_script:
+            formatted_command = manage_pre_processing_script_param(
+                pre_processing_script=pre_processing_script,
+                final_local_path_with_file_name=final_local_path_with_file_name
+            )
+            exec(formatted_command)
         print(f'File {file_name_with_path} Downloaded from Gdrive')
 
     except Exception as err:
@@ -439,7 +449,7 @@ def prepare_files_to_upload_to_s3(**kwargs):
         if file_extension == 'csv':
             source_df = pd.read_csv(final_local_path,skiprows=int(top_rows_to_skip),sep=source_file_delimiter,keep_default_na=False, na_values=[''],dtype=str)
             print(source_df)
-        elif file_extension == 'xlsx':
+        elif file_extension == 'xlsx' or file_extension == 'xls':
             source_df = pd.read_excel(final_local_path, sheet_name=source_sheet_name, skiprows=int(top_rows_to_skip),keep_default_na=False, na_values=[''],dtype=str)
         else:
             print(f'Unknown file extension {file_extension}')
@@ -596,6 +606,7 @@ def list_files_to_transfer(**kwargs):
             source_file_name_pattern = row['source_file_name_pattern']
             file_extension = row['source_file_type']
             source_sheet_name = row['source_sheet_name']
+            pre_processing_script = row['pre_processing_script']
             print(f'Source Sheet Name is : {source_sheet_name}')
             if source_sheet_name == '' or source_sheet_name is None:
                 source_sheet_name = 0
@@ -650,7 +661,7 @@ def list_files_to_transfer(**kwargs):
 
                 update_load_process_reference_table(p_unique_load_name = unique_load_name,p_file_name= file_name, p_airflow__dag_id= dag_id, p_airflow__run_id= run_id, p_first_time_check=1, p_process_current_status='Load Process is in Progress' )
                 try:
-                    download_file_from_gdrive(task_id=task_id, folder_id=file_parent_folder_id, file_name_with_path=file_name, local_path='/tmp')
+                    download_file_from_gdrive(task_id=task_id, folder_id=file_parent_folder_id, file_name_with_path=file_name, local_path='/tmp',pre_processing_script=pre_processing_script)
                     prepare_files_to_upload_to_s3(task_id=task_id, folder_id=file_parent_folder_id, file_name_with_path=file_name, local_path='/tmp',file_extension=file_extension,source_file_delimiter=source_file_delimiter, top_rows_to_skip=top_rows_to_skip,source_sheet_name=source_sheet_name,column_metadata_df=column_metadata_df)
                     upload_file_to_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',unique_load_name=unique_load_name,s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
                     load_csv_file_to_redshift(task_id=task_id,file_name_with_path=file_name,local_path='/tmp',unique_load_name=unique_load_name,s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)

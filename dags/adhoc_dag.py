@@ -33,7 +33,7 @@ import asyncio
 import aiohttp
 
 from airflow.models import XCom
-import glob
+import glob, json
 
 
 
@@ -85,10 +85,13 @@ def upload_file_to_s3(**kwargs):
   
 
 def adhoc_run(params,**kwargs):
-    with open('/tmp/64_inward.csv','r') as fil:
-        print('File exists')
-        for x in fil:
-            print(x)
+    gdrive_cred = json.loads(BaseHook.get_connection(GDRIVE_CONN).extra)
+    print(gdrive_cred)
+    gdrive_cred = json.loads(gdrive_cred["extra__google_cloud_platform__keyfile_dict"])
+    # with open('/tmp/64_inward.csv','r') as fil:
+    #     print('File exists')
+    #     for x in fil:
+    #         print(x)
             
     # upload_file_list = glob.glob('/tmp/wema_transactions_*.csv')
     # for filename in upload_file_list:

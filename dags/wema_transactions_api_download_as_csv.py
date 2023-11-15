@@ -66,12 +66,12 @@ columns_outward = ['id','transactionReference','sessionID','debitAccount','credi
 
 def get_last_max_date_time(partner_id,direction):
     redshift_hook = RedshiftSQLHook(redshift_conn_id=REDSHIFT_CONN_ID)
-    sql = f"select max(split_part(split_part(file_name, '/',  regexp_count(file_name, '/')+1) ,'_',7) || ' ' || split_part(split_part(file_name, '/',  regexp_count(file_name, '/')+1) ,'_',8)) from s3_ingestions.load_process_reference where file_name like '%wema_transactions_{direction}_{partner_id}%' and processed = True"
+    sql = f"select max(split_part(split_part(file_name, '/',  regexp_count(file_name, '/')+1) ,'_',7)) from s3_ingestions.load_process_reference where file_name like '%wema_transactions_{direction}_{partner_id}%' and processed = True"
     print(sql)
     result = redshift_hook.get_first(sql)
     if result and result[0]:
         result = result[0].strip('.csv')
-        result = datetime.strptime(result,'%Y%m%d %H')
+        result = datetime.strptime(result,'%Y%m%d')
     return (result)
 
 def upload_file_to_s3(**kwargs):
@@ -108,10 +108,10 @@ def upload_file_to_s3(**kwargs):
         # raise AirflowException(message)
         raise ValueError(message)
 
-def return_total_pages_records(partner_id, direction, start_date, end_date, start_time, end_time, page_number=1, page_size=100):
+def return_total_pages_records(partner_id, direction, start_date, end_date,  page_number=1, page_size=100):
     max_retries = 10
     retry_delay = 15  # 5 seconds
-    url = f"https://settlements-engine.private.paystack.co/providers/wema/transactions?pageNumber={page_number}&pageSize={page_size}&startDate={start_date}&endDate={end_date}&startTime={start_time}&endTime={end_time}&partnerId={partner_id}"
+    url = f"https://settlements-engine.private.paystack.co/providers/wema/transactions?pageNumber={page_number}&pageSize={page_size}&startDate={start_date}&endDate={end_date}&partnerId={partner_id}"
     print(url)
     for attempt in range(1, max_retries + 1):
         try:
@@ -144,17 +144,17 @@ def return_total_pages_records(partner_id, direction, start_date, end_date, star
                 print(message)
                 return  None  
             
-async def call_api_url_with_semaphore(session, semaphore, partner_id, direction, start_date, end_date, start_time, end_time, page_number, page_size=100):
+async def call_api_url_with_semaphore(session, semaphore, partner_id, direction, start_date, end_date,  page_number, page_size=100):
     async with semaphore:
-        return await call_api_url(session, partner_id, direction, start_date, end_date, start_time, end_time, page_number, page_size)
+        return await call_api_url(session, partner_id, direction, start_date, end_date, page_number, page_size)
 
 
 
-async def call_api_url(session, partner_id, direction, start_date, end_date, start_time, end_time, page_number, page_size=100):
+async def call_api_url(session, partner_id, direction, start_date, end_date, page_number, page_size=100):
     max_retries = 10
     retry_delay = 15  # 5 seconds
 
-    url = f"https://settlements-engine.private.paystack.co/providers/wema/transactions?pageNumber={page_number}&pageSize={page_size}&startDate={start_date}&endDate={end_date}&startTime={start_time}&endTime={end_time}&partnerId={partner_id}"
+    url = f"https://settlements-engine.private.paystack.co/providers/wema/transactions?pageNumber={page_number}&pageSize={page_size}&startDate={start_date}&endDate={end_date}&partnerId={partner_id}"
     
     for attempt in range(1, max_retries + 1):
         try:
@@ -191,12 +191,12 @@ async def call_api_url(session, partner_id, direction, start_date, end_date, sta
                 raise AirflowException(message)
 
 
-async def async_call_for_single_date(start_date,start_time,end_date,end_time,partner_id,direction):
-    print(f'Date Supplied is {start_date} {start_time}')
+async def async_call_for_single_date(start_date,end_date,partner_id,direction):
+    print(f'Date Supplied is {start_date} ')
     local_path = '/tmp'
     os.makedirs(local_path, exist_ok=True)
 
-    num_pages, total_records = return_total_pages_records(partner_id=partner_id,direction=direction,start_date=start_date,end_date=end_date,start_time=start_time,end_time=end_time)
+    num_pages, total_records = return_total_pages_records(partner_id=partner_id,direction=direction,start_date=start_date,end_date=end_date)
     print(f'Total pages : {num_pages}')
     print(f'Total Records : {total_records}')
     if total_records == 0:
@@ -204,18 +204,18 @@ async def async_call_for_single_date(start_date,start_time,end_date,end_time,par
         transactions['unique_row_number'] = transactions.index
         transactions['partnerid'] = partner_id
         transactions['direction'] = direction
-        filename = f'wema_transactions_{direction}_{partner_id}_{start_date.replace("-", "")}_{start_time}_{end_date.replace("-", "")}_{end_time}.csv'
+        filename = f'wema_transactions_{direction}_{partner_id}_{start_date.replace("-", "")}_{end_date.replace("-", "")}.csv'
         print(filename)
         transactions.to_csv(os.path.join(local_path, filename), index=False)
         print(f"Saved file: {filename}")
         task_id = 'uploading_'+filename
-        upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
+        #upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
 
         return
     
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     async with aiohttp.ClientSession() as session:  
-        tasks = [call_api_url_with_semaphore(session=session, semaphore=semaphore, partner_id=partner_id,direction=direction,start_date=start_date,end_date=end_date,start_time=start_time,end_time=end_time,page_number=page) for page in range(1, num_pages + 1)]
+        tasks = [call_api_url_with_semaphore(session=session, semaphore=semaphore, partner_id=partner_id,direction=direction,start_date=start_date,end_date=end_date,page_number=page) for page in range(1, num_pages + 1)]
         results = await asyncio.gather(*tasks)
 
     combined_data = []
@@ -230,11 +230,11 @@ async def async_call_for_single_date(start_date,start_time,end_date,end_time,par
         transactions['partnerid'] = partner_id
         transactions['direction'] = direction
 
-        filename = f'wema_transactions_{direction}_{partner_id}_{start_date.replace("-", "")}_{start_time}_{end_date.replace("-", "")}_{end_time}.csv'
+        filename = f'wema_transactions_{direction}_{partner_id}_{start_date.replace("-", "")}_{end_date.replace("-", "")}.csv'
         print(filename)
         transactions.to_csv(os.path.join(local_path, filename), index=False)
         task_id = 'uploading_'+filename
-        upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
+        #upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
                         
         print(f"Saved file: {filename}")
 
@@ -255,9 +255,7 @@ def wema_transactions_api_download_as_csv(params,**kwargs):
                 try:
                     if override_dates.lower() == 'y':
                         start_date = params['start_date']
-                        start_time = params['start_time']
                         end_date = params['end_date']
-                        end_time = params['end_time']
                     else:
                         prev_max_date_time = get_last_max_date_time(partner_id,direction)
                         diff_in_hours = (current_time_minus_required_hours - prev_max_date_time).total_seconds() / (60 * 60)

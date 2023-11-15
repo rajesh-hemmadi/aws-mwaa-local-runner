@@ -72,7 +72,8 @@ def process_df_and_load_to_temp(hook,spreadsheet_id,sheet_range,metadata_columns
 def get_s3_metadata_from_metadataSheet():
     try:
         # Specify the file path and sheet name of the Google Sheet
-        spreadsheet_id = '1DzbhmMZJ5DpCkkDYSGs5ITu4bD1UV5sPvbBETJwnH28'
+        #spreadsheet_id = '1DzbhmMZJ5DpCkkDYSGs5ITu4bD1UV5sPvbBETJwnH28'
+        spreadsheet_id = '1oXXsFNlgFe28lHq-FbOo3ss4JetGndYLxKenewOpMhE'
         target_table_metadata_sheet_name = "target_table_metadata!A:F"
         target_table_metadata_columns = ['id', 'target_db', 'target_schema', 'target_table', 'target_table_metadata_id']
 

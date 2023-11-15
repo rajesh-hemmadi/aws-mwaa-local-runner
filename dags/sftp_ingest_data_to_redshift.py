@@ -26,7 +26,7 @@ import fnmatch
 from typing import Any, Callable
 
 from airflow.models import XCom
-from utils.pre_processing_scripts import ghipssGenerateDateFolders, combine_excel_sheets_using_pandas
+from utils.pre_processing_scripts import *
 
 
 from datetime import datetime, timedelta
@@ -417,7 +417,9 @@ def download_file_from_sftp(**kwargs):
         task_id = kwargs.get('task_id', 'Download')
         file_name_with_path = kwargs.get('file_name_with_path') #it has fullpath
         local_path = kwargs.get('local_path', '/tmp')
+        pre_processing_script=kwargs.get('pre_processing_script',None)
         final_local_path = local_path + '/' + os.path.dirname(file_name_with_path)
+        final_local_path_with_file_name = local_path + '/' + file_name_with_path
         os.makedirs(final_local_path, exist_ok=True)
         only_file_name = file_name_with_path.split('/')[-1]
         ssh_conn_id , remote_filepath= file_name_with_path.split(':',1)
@@ -432,10 +434,17 @@ def download_file_from_sftp(**kwargs):
                
             )
         get_file.execute(context=None)
+        
+        if pre_processing_script:
+            formatted_command = manage_pre_processing_script_param(
+                pre_processing_script=pre_processing_script,
+                final_local_path_with_file_name=final_local_path_with_file_name
+            )
+            exec(formatted_command)
         print(f'File {file_name_with_path} Downloaded from SFTP')
         #This is only for zenith_gh statements files
-        if ssh_conn_id == 'sftp_zenith_gh' and 'statement' in final_local_path.lower():
-            combine_excel_sheets_using_pandas(final_local_path)
+        # if ssh_conn_id == 'sftp_zenith_gh' and final_local_path.lower().split('/')[-1] == 'statement':
+        #     combine_excel_sheets_using_pandas(final_local_path+ '/' +only_file_name)
 
     except Exception as err:
         print(err)
@@ -620,6 +629,7 @@ def list_files_to_transfer(**kwargs):
             source_file_name_pattern = row['source_file_name_pattern']
             file_extension = row['source_file_type']
             source_sheet_name = row['source_sheet_name']
+            pre_processing_script = row['pre_processing_script']
             print(f'Unique Load Name is : {unique_load_name}')
             print(f'Source Sheet Name is : {source_sheet_name}')
             if source_sheet_name == '' or source_sheet_name is None:
@@ -680,7 +690,7 @@ def list_files_to_transfer(**kwargs):
 
                 update_load_process_reference_table(p_unique_load_name = unique_load_name,p_file_name= file_name, p_airflow__dag_id= dag_id, p_airflow__run_id= run_id, p_first_time_check=1, p_process_current_status='Load Process is in Progress' )
                 try:
-                    download_file_from_sftp(task_id=task_id, file_name_with_path=file_name, local_path='/tmp')
+                    download_file_from_sftp(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',pre_processing_script=pre_processing_script)
                     prepare_files_to_upload_to_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',file_extension=file_extension,source_file_delimiter=source_file_delimiter, top_rows_to_skip=top_rows_to_skip,source_sheet_name=source_sheet_name,column_metadata_df=column_metadata_df)
                     upload_file_to_s3(task_id=task_id, file_name_with_path=file_name, local_path='/tmp',unique_load_name=unique_load_name,s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
                     load_csv_file_to_redshift(task_id=task_id,file_name_with_path=file_name,local_path='/tmp',unique_load_name=unique_load_name,s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)

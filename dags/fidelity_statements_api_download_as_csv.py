@@ -63,7 +63,7 @@ def date_range(START_DATE,END_DATE):
 
 def get_last_max_date():
     redshift_hook = RedshiftSQLHook(redshift_conn_id=REDSHIFT_CONN_ID)
-    sql = f"select coalesce(MAX(TO_DATE(replace(split_part(split_part(file_name,'/',4),'_',4),'.csv',''),'YYYYMMDD')),'2023-07-31'::date) as max_dt from s3_ingestions.load_process_reference  where file_name like '%fidelity_statements_%'  and processed = True"
+    sql = f"select coalesce(MAX(TO_DATE(replace(split_part(split_part(file_name,'/',4),'_',4),'.csv',''),'YYYYMMDD')),'2023-07-16'::date) as max_dt from s3_ingestions.load_process_reference  where file_name like '%fidelity_statements_%'  and processed = True"
     print(sql)
     result = redshift_hook.get_first(sql)
     if result and result[0]:
@@ -112,17 +112,22 @@ def call_api_url(start_date,end_date):
 
     #request_ref = '00000012'
     request_ref = datetime.now().strftime('%Y%m%d%H%M%S%f')
+    request_ref2 = request_ref +'_1'
     api_key = '7c35jki7JSMuoMUUV8nj_f2a1a607878242ecb736dfd9cc4454d5'
     client_secret = 'kx6ipATNrn1tM4os'
-
     headers = {
     'Authorization': 'Bearer 7c35jki7JSMuoMUUV8nj_f2a1a607878242ecb736dfd9cc4454d5',
     'Content-Type': 'application/json',
     'Signature': hashlib.md5(f'{request_ref};{client_secret}'.encode()).hexdigest()
     }
 
+    headers2 = {
+    'Authorization': 'Bearer 7c35jki7JSMuoMUUV8nj_f2a1a607878242ecb736dfd9cc4454d5',
+    'Content-Type': 'application/json',
+    'Signature': hashlib.md5(f'{request_ref2};{client_secret}'.encode()).hexdigest()
+    }
     #Post Data
-    data = {
+    post_data_extract_balance = {
     "request_ref": request_ref,
     "request_type": "get_statement",
     "auth": {
@@ -149,17 +154,42 @@ def call_api_url(start_date,end_date):
         "end_date": end_date
     }
     }
-}
+    }
+
+    post_data_extract_trasactions = { "request_ref": request_ref2, 
+ "request_type": "get_statement", 
+ "auth": { 
+     "type": "bank.acount", 
+     "secure": "ytSdVh0n0mdqkwH0Fv5bEw==", 
+     "auth_provider": "FidelityVirtual", 
+     "route_mode": None }, 
+ "transaction": { 
+     "mock_mode": "Live", 
+     "transaction_ref": request_ref2, 
+     "transaction_desc": "A random transaction",
+       "transaction_ref_parent": None, 
+       "amount": 0, 
+       "customer": { "customer_ref": "2348062085618",
+                     "firstname": "Fawaz", 
+                     "surname": "Haroun",
+                       "email": "fawaz@paystack.com", 
+                       "mobile_no": "2348062085618" }, 
+                     "details": { "start_date": start_date, "end_date": end_date } } }
 
     for attempt in range(1, max_retries + 1):
         try:
             # Send the POST request with the data
-            response = requests.post(url, json=data,headers=headers)
+            response = requests.post(url, json=post_data_extract_balance,headers=headers)
+            response2 = requests.post(url, json=post_data_extract_trasactions,headers=headers2)
 
             # Check the response status code
             if response.status_code == 200:
-                records_data = response.text
-                return records_data
+                balance_data = response.text
+                print(balance_data)
+            if response2.status_code == 200:
+                transactions_data = response2.text
+                print(transactions_data)
+                return balance_data ,transactions_data
         except (aiohttp.ClientError, KeyError) as e:
             print(f"Attempt {attempt} failed with error: {e}")
             print(f"Attempted url is : {url}")
@@ -187,23 +217,50 @@ def call_for_single_date(start_date,end_date):
     local_path = '/tmp'
     os.makedirs(local_path, exist_ok=True)
     try:
-        response = call_api_url(start_date=start_date,end_date=end_date)
-        data  = pd.read_json(response)
-        records_data = data['data']['provider_response']['statement_list']
-
-        transactions = pd.json_normalize(records_data, sep='_')
-        filename = f'fidelity_statements_'+start_date.replace('-','')+'_'+end_date.replace('-','')+'.csv'
-
-        transactions.columns = [
-            (''.join([i for i in c if i not in punctuation.replace('_', '')])).lower().strip().replace(' ', '_')
-            for c in transactions.columns]
-        transactions['unique_row_number'] = transactions.index
+        balance_data ,transactions_data = call_api_url(start_date=start_date,end_date=end_date)
+        #deal with balance data
+        filename = f'header_fidelity_statement_'+start_date.replace('-','')+'_'+end_date.replace('-','')+'.csv'
+        data  = pd.read_json(balance_data)
+        provider_response_code = data['data']['provider_response_code']
+        transactions_columns = ['statement_header_date', 'opening_balance', 'closing_balance']
+        if provider_response_code != '00':
+            transactions = pd.DataFrame(columns=transactions_columns)
+        else:
+            opening_balance = data['data']['provider_response']['opening_balance']
+            closing_balance = data['data']['provider_response']['closing_balance']
+            transactions = pd.DataFrame([[start_date,opening_balance,closing_balance]],columns=transactions_columns)
 
         transactions.to_csv(os.path.join(local_path, filename), index=False)
         task_id = 'uploading_'+filename
-        upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)
-                        
+        #upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)                
         print(f"Saved file: {filename}")
+
+
+        #deal with transactions data
+        print('Printing Transactions')
+        print(transactions_data)
+        filename = f'fidelity_statement_'+start_date.replace('-','')+'_'+end_date.replace('-','')+'.csv'
+        data  = pd.read_json(transactions_data)
+        provider_response_code = data['data']['provider_response_code']
+        if provider_response_code != '200':
+            transactions_columns = ['transaction_reference', 'transaction_amount', 'balance', 'transaction_type', 'transaction_date', 'description', 'meta_sessionid', 'meta_nameenquiryref', 'meta_destinationinstitutecode', 'meta_channel', 'meta_beneficiaryaccountname', 'meta_beneficiaryaccountnumber', 'meta_beneficiarybankverificationnumber', 'meta_beneficiarykyclevel', 'meta_originatoraccountname', 'meta_originatoraccountnumber', 'meta_originatorbankverificationnumber', 'meta_originatorkyclevel', 'meta_transactionlocation', 'meta_narration', 'meta_bankname', 'meta_bankcode', 'meta_referencenumber', 'meta_paymentreference', 'meta_amount', 'meta_status', 'meta_statusmessage', 'meta_collectionaccountnumber', 'meta_trandate', 'meta_createdon', 'meta_updatedon', 'unique_row_number']
+            transactions = pd.DataFrame(columns=transactions_columns)
+            transactions['unique_row_number'] = transactions.index
+        else:
+            records_data = data['data']['provider_response']['statement_list']
+            print(records_data)
+            transactions = pd.json_normalize(records_data, sep='_')
+            transactions.columns = [
+                (''.join([i for i in c if i not in punctuation.replace('_', '')])).lower().strip().replace(' ', '_')
+                for c in transactions.columns]
+            transactions['unique_row_number'] = transactions.index
+
+        transactions.to_csv(os.path.join(local_path, filename), index=False)
+        task_id = 'uploading_'+filename
+        #upload_file_to_s3(task_id=task_id, file_name_with_path=filename, local_path='/tmp',s3_bucket_name=S3_BUCKET_NAME, s3_prefix_start=S3_PREFIX_START)                
+        print(f"Saved file: {filename}")
+
+
     except Exception as err:        
         print(err)
         message = "Function call_for_single_date failed,  Could not download data from api for dates " + start_date + " and "+ end_date +" : \n" + \
@@ -215,14 +272,17 @@ def call_for_single_date(start_date,end_date):
 def fidelity_statements_api_download_as_csv(params,**kwargs):
     try:
         override_dates = params['override_dates']
-        expected_run_date = (datetime.now() - timedelta(-1)).date() #This is date
+        expected_run_date = (datetime.now() - timedelta(days=1)).date() #This is date
+        print(f'Expected Run Date is : {expected_run_date}')
 
         local_path = kwargs.get('local_path', '/tmp')
         os.makedirs(local_path, exist_ok=True)
 
         if override_dates.lower() == 'y':
-            start_date = params['start_date']
-            end_date = params['end_date']
+            start_date = datetime.strptime(params['start_date'],'%Y-%m-%d') 
+            end_date = datetime.strptime(params['end_date'],'%Y-%m-%d') 
+            latest_start_date = start_date
+            latest_end_date_should_be = end_date
         else:
             prev_max_date = get_last_max_date()
             diff_in_days = (expected_run_date - prev_max_date).days
@@ -264,7 +324,7 @@ with DAG(dag_id="fidelity_statements_api_download_as_csv",
          default_args=default_args,
          max_active_runs=1,
          dagrun_timeout=timedelta(hours=3),
-         schedule_interval="*/10 * * * *",
+         schedule_interval="30 6 * * *",
          start_date=datetime(2023, 8, 12, 8, 30),
          catchup=False,
          tags=["wema", "transactions", "download"],
